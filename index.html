@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pi Pico-w 3D Autonomous Robot Simulation</title>
+  
+  <!-- Font and Stylesheets -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  
+  <!-- Three.js Library and OrbitControls from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body class="dark-mode">
+  <div id="app-container">
+    
+    <!-- Top Status Bar -->
+    <header class="app-header">
+      <div class="logo-area">
+        <span class="pulse-dot status-active"></span>
+        <h1>PI PICO-W ROBOTICS SIMULATOR</h1>
+        <span class="badge">V3.0 REALTIME 3D</span>
+      </div>
+      
+      <!-- Track Selection Tabs -->
+      <div class="track-tab-selector">
+        <button id="tab-track-b" class="tab-btn active">TRACK B: EMBEDDED SYSTEM</button>
+        <button id="tab-track-a" class="tab-btn">TRACK A: ROS2 AUTOPILOT</button>
+      </div>
+
+      <div class="system-status">
+        <div class="status-item">
+          <span class="label">MAP:</span>
+          <select id="map-select">
+            <option value="knut-chungju">KNUT 충주캠퍼스 (Chungju Campus)</option>
+            <option value="knut-uiwang">KNUT 의왕캠퍼스 (Uiwang Campus)</option>
+            <option value="obstacle-course">종합 장애물 코스 (Obstacle Course)</option>
+          </select>
+        </div>
+        <div class="status-item">
+          <span class="label">WIFI:</span>
+          <span id="wifi-ssid" class="value text-success">Wi_KNUT</span>
+        </div>
+        <div class="status-item">
+          <span class="label">IP:</span>
+          <span id="pico-ip" class="value text-warning">Connecting...</span>
+        </div>
+        <div class="status-item">
+          <span class="label">BATTERY:</span>
+          <span id="virtual-battery" class="value text-info">6.12V (Simulated)</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Workspace Layout -->
+    <main class="main-content">
+      
+      <!-- Left Panel: Telemetry & FPV -->
+      <section class="panel left-panel">
+        
+        <!-- FPV View -->
+        <div class="card fpv-card">
+          <div class="card-header">
+            <h3>FIRST PERSON VIEW (FPV)</h3>
+            <span class="tag text-danger">LIVE CAM</span>
+          </div>
+          <div class="card-body cam-container">
+            <div id="fpv-viewport"></div>
+            <div class="cam-overlay">
+              <div class="crosshair"></div>
+              <div class="overlay-data">
+                <span id="cam-fps">FPS: 60</span>
+                <span id="cam-res">320 x 240</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Telemetry Data -->
+        <div class="card telemetry-card">
+          <div class="card-header">
+            <h3>ROBOT TELEMETRY</h3>
+          </div>
+          <div class="card-body">
+            <div class="telemetry-grid">
+              <div class="telemetry-item">
+                <div class="label">Speed</div>
+                <div class="value" id="val-speed">0.0 m/s</div>
+              </div>
+              <div class="telemetry-item">
+                <div class="label">Steering</div>
+                <div class="value" id="val-steer">0.0°</div>
+              </div>
+              <div class="telemetry-item">
+                <div class="label">Sensor Distance</div>
+                <div class="value text-warning font-mono" id="val-distance">-- cm</div>
+              </div>
+              <div class="telemetry-item">
+                <div class="label">Heading / Yaw</div>
+                <div class="value" id="val-heading">0.0°</div>
+              </div>
+            </div>
+            
+            <div class="location-readout">
+              <div class="sub-label">GPS Coordinate (Simulated)</div>
+              <div class="coords" id="val-coords">36°58'11.0"N, 127°52'17.0"E</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Self-Driving Stack Monitor -->
+        <div class="card sdc-card">
+          <div class="card-header">
+            <h3>SELF-DRIVING STACK MONITOR</h3>
+            <span class="badge" id="sdc-state-badge">INACTIVE</span>
+          </div>
+          <div class="card-body" id="track-b-sdc-body">
+            <div class="grid-viz-container">
+              <canvas id="occupancy-canvas" width="120" height="120"></canvas>
+              <div class="stack-status-info">
+                <div class="stack-row"><span>State:</span><span id="sdc-behavior-state" class="font-mono text-info">INACTIVE</span></div>
+                <div class="stack-row"><span>CTE (Yaw Err):</span><span id="sdc-cte" class="font-mono text-warning">0.00</span></div>
+                <div class="stack-row"><span>Target Speed:</span><span id="sdc-target-speed" class="font-mono">0.0 m/s</span></div>
+              </div>
+            </div>
+            
+            <div class="supervisor-section">
+              <div class="sub-label">Supervisor Checklist</div>
+              <div class="supervisor-grid">
+                <div class="chk-item"><span class="chk-dot active" id="chk-gps"></span>GPS</div>
+                <div class="chk-item"><span class="chk-dot active" id="chk-imu"></span>IMU</div>
+                <div class="chk-item"><span class="chk-dot active" id="chk-ultra"></span>Sensor</div>
+                <div class="chk-item"><span class="chk-dot active" id="chk-cpu"></span>Watchdog</div>
+              </div>
+              <button id="btn-trigger-fault" class="btn-small text-danger" style="margin-top: 10px; width: 100%;">TRIGGER SENSOR BLOCKAGE</button>
+            </div>
+          </div>
+          <!-- Track A: EDA & nuScenes Scan -->
+          <div class="card-body hidden" id="track-a-sdc-body">
+            <div class="eda-container" style="display: flex; flex-direction: column; gap: 8px;">
+              <div class="eda-header-info" style="display: flex; justify-content: space-between; font-size: 0.7rem; margin-bottom: 2px;">
+                <span class="tag text-info" style="background: rgba(79,172,254,0.15); border: 1px solid var(--accent-blue); padding: 1px 4px; border-radius: 4px;">nuScenes SCAN STREAM</span>
+                <span id="eda-frame-num" class="font-mono text-muted">FRAME: 000</span>
+              </div>
+              <div class="grid-viz-container" style="margin-bottom: 4px;">
+                <canvas id="eda-radar-canvas" width="120" height="120" style="background: #020205; border: 1px solid var(--border-light); border-radius: 6px; width: 96px; height: 96px;"></canvas>
+                <div class="stack-status-info">
+                  <div class="stack-row"><span>Obj Class:</span><span id="eda-active-class" class="font-mono text-info">--</span></div>
+                  <div class="stack-row"><span>Confidence:</span><span id="eda-active-conf" class="font-mono text-success">--</span></div>
+                  <div class="stack-row"><span>Range:</span><span id="eda-active-dist" class="font-mono text-warning">--</span></div>
+                </div>
+              </div>
+              <div class="eda-controls" style="display: flex; justify-content: space-between;">
+                <button id="btn-eda-next" class="btn-small" style="width: 48%;">NEXT FRAME</button>
+                <button id="btn-eda-run" class="btn-small text-info" style="width: 48%;">RUN PANDAS EDA</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pico Server Console Logs -->
+        <div class="card console-card">
+          <div class="card-header">
+            <h3 id="console-title">VIRTUAL PICO W LOG CONSOLE</h3>
+            <button id="btn-clear-console" class="btn-small">CLEAR</button>
+          </div>
+          <div class="card-body font-mono" id="pico-console">
+            <div class="log-line text-muted">[System] Initializing MicroPython Virtual Machine...</div>
+          </div>
+          <div class="card-body font-mono hidden" id="ros2-console">
+            <div class="log-line text-muted">[ROS2] Initializing rclpy nodes...</div>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- Center Panel: 3D Viewport -->
+      <section class="panel center-panel">
+        <div class="viewport-wrapper">
+          <div id="main-3d-viewport"></div>
+          
+          <!-- Interactive HUD overlay -->
+          <div class="viewport-hud">
+            <div class="hud-controls">
+              <button id="btn-cam-orbit" class="btn-hud active">ORBIT VIEW</button>
+              <button id="btn-cam-fpv" class="btn-hud">DRIVE FPV</button>
+              <button id="btn-cam-chase" class="btn-hud">CHASE CAM</button>
+              <button id="btn-cam-top" class="btn-hud">TOP-DOWN</button>
+            </div>
+            
+            <div class="hud-indicators">
+              <span class="indicator-item" id="indicator-laser">
+                <span class="dot active"></span> LASER GUIDE
+              </span>
+              <span class="indicator-item" id="indicator-auto">
+                <span class="dot"></span> AUTOPILOT
+              </span>
+            </div>
+          </div>
+          
+          <!-- Instructions overlay -->
+          <div class="keyboard-helper">
+            <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> or <kbd>↑</kbd> <kbd>←</kbd> <kbd>↓</kbd> <kbd>→</kbd> to Drive | <kbd>Space</kbd> to Stop
+          </div>
+        </div>
+      </main>
+
+      <!-- Right Panel: Controls & Hardware Breadboard -->
+      <section class="panel right-panel">
+        
+        <div class="card controls-card">
+          <div class="card-header">
+            <h3 id="controls-title">ROBOT DIRECT CONTROLLER</h3>
+          </div>
+          <div class="card-body" id="track-b-controls-body">
+            
+            <!-- HTTP Original Page Control Panel -->
+            <div class="control-dpad">
+              <div class="dpad-row">
+                <button id="ctrl-forward" class="btn-ctrl">FORWARD</button>
+              </div>
+              <div class="dpad-row">
+                <button id="ctrl-left" class="btn-ctrl">LEFT</button>
+                <button id="ctrl-stop" class="btn-ctrl text-danger">STOP</button>
+                <button id="ctrl-right" class="btn-ctrl">RIGHT</button>
+              </div>
+              <div class="dpad-row">
+                <button id="ctrl-back" class="btn-ctrl">BACK</button>
+              </div>
+            </div>
+
+            <!-- PWM Speed Slider -->
+            <div class="pwm-slider-container">
+              <div class="slider-labels">
+                <span class="label">PWM Duty Cycle (Speed):</span>
+                <span id="pwm-value" class="value">70%</span>
+              </div>
+              <input type="range" id="slider-pwm" min="0" max="100" value="70" class="range-slider">
+            </div>
+
+            <hr class="divider">
+
+            <!-- Autonomous Driver Mode -->
+            <div class="autopilot-section">
+              <div class="toggle-container">
+                <span class="label-heading">Autonomous Navigation</span>
+                <label class="switch">
+                  <input type="checkbox" id="chk-autonomous">
+                  <span class="slider round"></span>
+                </label>
+              </div>
+              <p class="description">
+                Using simulated HC-SR04 ultrasonic sensor to steer away from obstacles (detection radius: 80cm).
+              </p>
+            </div>
+
+          </div>
+          
+          <!-- Track A Controls -->
+          <div class="card-body hidden" id="track-a-controls-body">
+            <!-- Autopilot Switch -->
+            <div class="autopilot-section" style="margin-bottom: 8px;">
+              <div class="toggle-container">
+                <span class="label-heading">ROS2 Autopilot System</span>
+                <label class="switch">
+                  <input type="checkbox" id="chk-ros2-autonomous">
+                  <span class="slider round"></span>
+                </label>
+              </div>
+            </div>
+            
+            <!-- Lateral Control Select -->
+            <div class="control-group" style="margin-bottom: 8px;">
+              <label class="label-heading" style="display: block; margin-bottom: 4px; font-size: 0.75rem; color: #64748b;">Lateral Controller</label>
+              <select id="ctrl-law-select" style="width: 100%; background: rgba(11, 13, 30, 0.7); border: 1px solid var(--border-light); color: #fff; padding: 6px; border-radius: 6px; font-size: 0.75rem; outline: none; cursor: pointer;">
+                <option value="stanley">Stanley Lateral Controller</option>
+                <option value="pid">PID Steering Controller</option>
+              </select>
+            </div>
+            
+            <!-- Stanley Parameter Inputs -->
+            <div id="stanley-gains" class="gain-sliders">
+              <div class="pwm-slider-container" style="margin-top: 6px;">
+                <div class="slider-labels">
+                  <span class="label">Cross-Track Gain (k):</span>
+                  <span id="stanley-k-val" class="value">1.2</span>
+                </div>
+                <input type="range" id="slider-stanley-k" min="1" max="40" value="12" class="range-slider">
+              </div>
+              <div class="pwm-slider-container" style="margin-top: 6px;">
+                <div class="slider-labels">
+                  <span class="label">Softening Factor (ks):</span>
+                  <span id="stanley-ks-val" class="value">0.5</span>
+                </div>
+                <input type="range" id="slider-stanley-ks" min="0" max="20" value="5" class="range-slider">
+              </div>
+            </div>
+            
+            <!-- PID Steering Parameter Inputs -->
+            <div id="pid-gains" class="gain-sliders hidden">
+              <div class="pwm-slider-container" style="margin-top: 6px;">
+                <div class="slider-labels">
+                  <span class="label">Steering Kp:</span>
+                  <span id="pid-kp-val" class="value">1.5</span>
+                </div>
+                <input type="range" id="slider-pid-kp" min="1" max="50" value="15" class="range-slider">
+              </div>
+              <div class="pwm-slider-container" style="margin-top: 6px;">
+                <div class="slider-labels">
+                  <span class="label">Steering Ki:</span>
+                  <span id="pid-ki-val" class="value">0.1</span>
+                </div>
+                <input type="range" id="slider-pid-ki" min="0" max="20" value="1" class="range-slider">
+              </div>
+              <div class="pwm-slider-container" style="margin-top: 6px;">
+                <div class="slider-labels">
+                  <span class="label">Steering Kd:</span>
+                  <span id="pid-kd-val" class="value">0.2</span>
+                </div>
+                <input type="range" id="slider-pid-kd" min="0" max="20" value="2" class="range-slider">
+              </div>
+            </div>
+            
+            <hr class="divider" style="margin: 8px 0;">
+            
+            <!-- Longitudinal Speed Input -->
+            <div class="pwm-slider-container" style="margin-top: 4px;">
+              <div class="slider-labels">
+                <span class="label">Target Speed (m/s):</span>
+                <span id="target-speed-val" class="value">8.0</span>
+              </div>
+              <input type="range" id="slider-target-speed" min="20" max="150" value="80" class="range-slider">
+            </div>
+          </div>
+        </div>
+
+        <!-- Simulated Microcontroller Breadboard -->
+        <div class="card breadboard-card">
+          <div class="card-header">
+            <h3 id="hardware-title">PICO W & BREADBOARD EMULATOR</h3>
+            <span class="badge badge-green" id="hardware-badge">GPIO STATUS</span>
+          </div>
+          <div class="card-body" id="track-b-hardware-body">
+            <div class="breadboard-diagram">
+              
+              <!-- Pi Pico W Board Graphic -->
+              <div class="pico-board">
+                <div class="pico-title">Raspberry Pi Pico W</div>
+                <div class="pin-grid">
+                  <div class="pin-row"><span class="pin-label">GP2 (Mot A Fwd)</span><span class="pin-led" id="led-gp2"></span></div>
+                  <div class="pin-row"><span class="pin-label">GP3 (Mot A Back)</span><span class="pin-led" id="led-gp3"></span></div>
+                  <div class="pin-row"><span class="pin-label">GP7 (Mot B Fwd)</span><span class="pin-led" id="led-gp7"></span></div>
+                  <div class="pin-row"><span class="pin-label">GP8 (Mot B Back)</span><span class="pin-led" id="led-gp8"></span></div>
+                  <div class="pin-row"><span class="pin-label">GP4 (ENA PWM)</span><span class="pwm-bar-container"><span class="pwm-bar" id="pwm-bar-a" style="width: 70%;"></span></span></div>
+                  <div class="pin-row"><span class="pin-label">GP6 (ENB PWM)</span><span class="pwm-bar-container"><span class="pwm-bar" id="pwm-bar-b" style="width: 70%;"></span></span></div>
+                  <div class="pin-row"><span class="pin-label">GP5 (Ultrasonic Trig)</span><span class="pin-led" id="led-gp5"></span></div>
+                  <div class="pin-row"><span class="pin-label">GP9 (Ultrasonic Echo)</span><span class="pin-led" id="led-gp9"></span></div>
+                </div>
+              </div>
+
+              <!-- L298N Driver Graphic -->
+              <div class="motor-driver-card">
+                <div class="driver-title">L298N Dual H-Bridge</div>
+                <div class="driver-outputs">
+                  <div class="output-item">
+                    <span>Motor A (Left)</span>
+                    <span id="txt-motor-a" class="status text-muted">STOP</span>
+                  </div>
+                  <div class="output-item">
+                    <span>Motor B (Right)</span>
+                    <span id="txt-motor-b" class="status text-muted">STOP</span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+          
+          <!-- Track A ROS2 active node visualizer -->
+          <div class="card-body hidden" id="track-a-hardware-body" style="padding: 10px; display: flex; flex-direction: column; justify-content: center; align-items: center;">
+            <div class="ros2-graph-title" style="font-size: 0.65rem; color: var(--accent-cyan); font-family: var(--font-mono); margin-bottom: 6px; width: 100%; text-align: center; font-weight: bold;">
+              ACTIVE ROS2 COMPUTATION GRAPH
+            </div>
+            <div style="position: relative; width: 100%; height: 180px; background: #020205; border: 1px solid var(--border-light); border-radius: 8px; overflow: hidden;">
+              <canvas id="ros2-graph-canvas" width="318" height="178" style="width: 100%; height: 100%; display: block;"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Simulation Settings -->
+        <div class="card settings-card">
+          <div class="card-header">
+            <h3>ENVIRONMENT & SIMULATION SETTINGS</h3>
+          </div>
+          <div class="card-body">
+            <div class="settings-form">
+              
+              <div class="control-group">
+                <label>Time of Day / Weather</label>
+                <div class="btn-group">
+                  <button id="btn-env-day" class="btn-env active">DAY</button>
+                  <button id="btn-env-sunset" class="btn-env">SUNSET</button>
+                  <button id="btn-env-night" class="btn-env">NIGHT</button>
+                </div>
+              </div>
+
+              <div class="control-group inline">
+                <label for="chk-headlights">Robot Headlights</label>
+                <label class="switch">
+                  <input type="checkbox" id="chk-headlights" checked>
+                  <span class="slider round"></span>
+                </label>
+              </div>
+
+              <div class="control-group inline">
+                <label for="chk-laser">Laser Guidance Beam</label>
+                <label class="switch">
+                  <input type="checkbox" id="chk-laser" checked>
+                  <span class="slider round"></span>
+                </label>
+              </div>
+
+              <div class="control-group">
+                <label for="slider-friction">Surface Friction Coefficient</label>
+                <input type="range" id="slider-friction" min="1" max="10" value="5" class="range-slider">
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+      </section>
+      
+    </main>
+  </div>
+
+  <!-- Load Custom Scripts -->
+  <script type="module" src="js/pico_vm.js"></script>
+  <script type="module" src="js/sdc_stack.js"></script>
+  <script type="module" src="js/simulation.js"></script>
+  <script type="module" src="js/dashboard.js"></script>
+</body>
+</html>
