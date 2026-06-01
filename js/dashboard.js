@@ -94,6 +94,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // 2.5 Initialize SDC Modular Software Stack
   const sdc = new SDCSystem(picoVM);
 
+  // 2.6 Initialize Reinforcement Learning Agent
+  const rlAgent = new RLAgent();
+  window.rlAgent = rlAgent;
+
   // Start virtual board connection boot sequence and draw waypoints
   picoVM.boot().then(() => {
     picoIpSpan.innerText = picoVM.ip;
@@ -245,19 +249,93 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         // Faint border lines
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
         ctx.strokeRect(c * cellSize, r * cellSize, cellSize, cellSize);
       }
     }
 
-    // Draw robot in the center
     const center = size / 2;
-    ctx.fillStyle = '#ff4757'; // Red dot for robot position
+    const pixelsPerMeter = size / (gridCount * sdc.mapping.cellSize);
+
+    // 1. Draw EKF Covariance Uncertainty Ellipse
+    if (sdc.state.ekfPos && sdc.state.ekfP) {
+      const dx = sdc.state.ekfPos.x - simulation.car.position.x;
+      const dz = sdc.state.ekfPos.z - simulation.car.position.z;
+      const estX = center + dx * pixelsPerMeter;
+      const estY = center + dz * pixelsPerMeter;
+
+      const P = sdc.state.ekfP;
+      const p00 = P[0][0]; // Var(X)
+      const p01 = P[0][1]; // Cov(X, Z)
+      const p11 = P[1][1]; // Var(Z)
+
+      const sum = p00 + p11;
+      const diff = p00 - p11;
+      const term = Math.sqrt(diff * diff + 4 * p01 * p01);
+      const lambda1 = (sum + term) / 2;
+      const lambda2 = (sum - term) / 2;
+
+      // 2 sigma ellipse (approx 95% confidence)
+      const sigma = 2.0;
+      const axisX = Math.sqrt(Math.max(0.001, lambda1)) * pixelsPerMeter * sigma;
+      const axisY = Math.sqrt(Math.max(0.001, lambda2)) * pixelsPerMeter * sigma;
+
+      let phi = 0;
+      if (Math.abs(p00 - p11) > 1e-6) {
+        phi = 0.5 * Math.atan2(2 * p01, p00 - p11);
+      } else {
+        phi = p01 > 0 ? Math.PI / 4 : (p01 < 0 ? -Math.PI / 4 : 0);
+      }
+
+      ctx.strokeStyle = 'rgba(0, 242, 254, 0.4)';
+      ctx.lineWidth = 1.0;
+      ctx.fillStyle = 'rgba(0, 242, 254, 0.05)';
+      ctx.beginPath();
+      ctx.ellipse(estX, estY, axisX, axisY, phi, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // 2. Draw EKF Estimated Pose (Blue dot)
+      ctx.fillStyle = '#00f2fe';
+      ctx.beginPath();
+      ctx.arc(estX, estY, 3.0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw EKF estimated heading arrow
+      const estHeading = sdc.state.ekfPos.yaw;
+      ctx.strokeStyle = '#00f2fe';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(estX, estY);
+      ctx.lineTo(estX + Math.sin(estHeading) * 10, estY + Math.cos(estHeading) * 10);
+      ctx.stroke();
+    }
+
+    // 3. Draw simulated GPS raw updates (Green crosshair/marker) if active
+    if (sdc.state.gpsMeas && sdc.state.gpsUpdated) {
+      const dxGps = sdc.state.gpsMeas.x - simulation.car.position.x;
+      const dzGps = sdc.state.gpsMeas.z - simulation.car.position.z;
+      const gpsX = center + dxGps * pixelsPerMeter;
+      const gpsY = center + dzGps * pixelsPerMeter;
+
+      ctx.strokeStyle = '#00e676';
+      ctx.lineWidth = 1.0;
+      ctx.beginPath();
+      ctx.arc(gpsX, gpsY, 5, 0, Math.PI * 2);
+      ctx.moveTo(gpsX - 7, gpsY);
+      ctx.lineTo(gpsX + 7, gpsY);
+      ctx.moveTo(gpsX, gpsY - 7);
+      ctx.lineTo(gpsX, gpsY + 7);
+      ctx.stroke();
+    }
+
+    // 4. Draw Ground Truth robot in the center (Red dot)
+    ctx.fillStyle = '#ff4757';
     ctx.beginPath();
     ctx.arc(center, center, 3.5, 0, Math.PI * 2);
     ctx.fill();
 
-    // Draw heading sweep arrow
+    // Draw Ground Truth heading sweep arrow
     const heading = simulation.car.angle;
     ctx.strokeStyle = '#ff4757';
     ctx.lineWidth = 1.5;
@@ -279,6 +357,11 @@ document.addEventListener('DOMContentLoaded', () => {
     autoNavTimer = setInterval(() => {
       // Execute 5 SDC Modules tick
       sdc.tick(simulation.car, simulation.sensorDistance, 0.1);
+
+      // Sync estimated pose to 3D simulation ghost vehicle
+      if (sdc.state.ekfPos) {
+        simulation.setEstimatedPose(sdc.state.ekfPos.x, sdc.state.ekfPos.z, sdc.state.ekfPos.yaw);
+      }
 
       // Render 2D occupancy grid sweep
       drawOccupancyGrid(sdc.mapping.occupancyGrid);
@@ -318,6 +401,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const stopAutonomousMode = () => {
     sdc.state.active = false;
+    
+    // Clear 3D ghost vehicle visualization
+    simulation.clearEstimatedPose();
     
     if (autoNavTimer) {
       clearInterval(autoNavTimer);
@@ -477,8 +563,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const steerVal = parseInt(telemetry.steer);
     valSteer.innerText = steerVal === 0 ? '0°' : (steerVal > 0 ? `L ${steerVal}°` : `R ${Math.abs(steerVal)}°`);
 
-    // Distance rendering (LiDAR is in meters for Track A, Ultrasonic is in cm for Track B)
-    if (telemetry.trackAActive) {
+    // Distance rendering (LiDAR is in meters for Track A/C, Ultrasonic is in cm for Track B)
+    if (telemetry.trackAActive || telemetry.trackCActive) {
       const distM = (telemetry.distance / 100.0);
       valDistance.innerText = `${distM.toFixed(1)} m`;
       if (distM < 5.0) {
@@ -512,26 +598,85 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentLon = ref.lon + lonOffset;
 
     valCoords.innerText = `${currentLat.toFixed(6)}°N, ${currentLon.toFixed(6)}°E`;
+
+    // Track C Live Monitor telemetry updates
+    if (telemetry.trackCActive && window.rlAgent) {
+      const agent = window.rlAgent;
+      if (rlValEpisode) rlValEpisode.innerText = agent.episodeCount;
+      if (rlValStep) rlValStep.innerText = agent.stepCount;
+      if (rlValReward) rlValReward.innerText = (agent.lastReward !== undefined ? agent.lastReward : 0.0).toFixed(2);
+      if (rlValCumReward) rlValCumReward.innerText = agent.episodeReward.toFixed(1);
+
+      // Normalize and render the Q-values onto progress bars
+      const outputs = agent.nnActivations.outputs;
+      const minQ = Math.min(...outputs);
+      const maxQ = Math.max(...outputs);
+      const range = maxQ - minQ || 1.0;
+
+      const qBarIds = [
+        { bar: 'q-bar-left-hard', val: 'q-val-left-hard' },
+        { bar: 'q-bar-left-soft', val: 'q-val-left-soft' },
+        { bar: 'q-bar-straight', val: 'q-val-straight' },
+        { bar: 'q-bar-right-soft', val: 'q-val-right-soft' },
+        { bar: 'q-bar-right-hard', val: 'q-val-right-hard' }
+      ];
+
+      qBarIds.forEach((ids, idx) => {
+        const qVal = outputs[idx];
+        const pct = Math.max(0, Math.min(100, ((qVal - minQ) / range) * 100));
+        const barElem = document.getElementById(ids.bar);
+        const valElem = document.getElementById(ids.val);
+        if (barElem) barElem.style.width = `${pct}%`;
+        if (valElem) valElem.innerText = qVal.toFixed(2);
+      });
+    }
   };
 
-  // --- TRACK A DYNAMIC UI GLUE AND INTERACTIVE LOOPS ---
+  // --- TRACK A/B/C DYNAMIC UI GLUE AND INTERACTIVE LOOPS ---
   const tabTrackB = document.getElementById('tab-track-b');
   const tabTrackA = document.getElementById('tab-track-a');
+  const tabTrackC = document.getElementById('tab-track-c');
   
   const trackBSdcBody = document.getElementById('track-b-sdc-body');
   const trackASdcBody = document.getElementById('track-a-sdc-body');
+  const trackCSdcBody = document.getElementById('track-c-sdc-body');
   
   const ros2Console = document.getElementById('ros2-console');
+  const rlConsole = document.getElementById('rl-console');
   const consoleTitle = document.getElementById('console-title');
   
   const trackBControlsBody = document.getElementById('track-b-controls-body');
   const trackAControlsBody = document.getElementById('track-a-controls-body');
+  const trackCControlsBody = document.getElementById('track-c-controls-body');
   const controlsTitle = document.getElementById('controls-title');
   
   const trackBHardwareBody = document.getElementById('track-b-hardware-body');
   const trackAHardwareBody = document.getElementById('track-a-hardware-body');
+  const trackCHardwareBody = document.getElementById('track-c-hardware-body');
   const hardwareTitle = document.getElementById('hardware-title');
   const hardwareBadge = document.getElementById('hardware-badge');
+
+  // Track C Controls and display elements
+  const btnRlStart = document.getElementById('btn-rl-start');
+  const btnRlPause = document.getElementById('btn-rl-pause');
+  const btnRlReset = document.getElementById('btn-rl-reset');
+
+  const rlValEpisode = document.getElementById('rl-val-episode');
+  const rlValStep = document.getElementById('rl-val-step');
+  const rlValReward = document.getElementById('rl-val-reward');
+  const rlValCumReward = document.getElementById('rl-val-cumreward');
+
+  const sliderRlEpsilon = document.getElementById('slider-rl-epsilon');
+  const labelRlEpsilon = document.getElementById('rl-epsilon-val');
+  const sliderRlSpeedup = document.getElementById('slider-rl-speedup');
+  const labelRlSpeedup = document.getElementById('rl-speedup-val');
+
+  const sliderRlWeightSpeed = document.getElementById('slider-rl-weight-speed');
+  const labelRlWeightSpeed = document.getElementById('rl-weight-speed-val');
+  const sliderRlWeightCte = document.getElementById('slider-rl-weight-cte');
+  const labelRlWeightCte = document.getElementById('rl-weight-cte-val');
+  const sliderRlWeightCol = document.getElementById('slider-rl-weight-col');
+  const labelRlWeightCol = document.getElementById('rl-weight-col-val');
 
   // Track A Controllers and parameter references
   const chkRos2Autonomous = document.getElementById('chk-ros2-autonomous');
@@ -764,12 +909,8 @@ document.addEventListener('DOMContentLoaded', () => {
     { from: 4, to: 0, label: '/vehicle_cmd', pos: 0.0, speed: 0.025 }
   ];
 
-  const animateGraph = () => {
-    if (!simulation.trackAActive) {
-      requestAnimationFrame(animateGraph);
-      return;
-    }
-
+  // Draw ROS2 Computation Graph
+  const drawROS2Graph = () => {
     const w = graphCanvas.width;
     const h = graphCanvas.height;
     graphCtx.clearRect(0, 0, w, h);
@@ -825,7 +966,207 @@ document.addEventListener('DOMContentLoaded', () => {
       graphCtx.textBaseline = 'middle';
       graphCtx.fillText(node.label, node.x, node.y);
     });
+  };
 
+  // Draw RL Episode Cumulative Rewards History Chart
+  const drawRlRewardChart = () => {
+    const canvas = document.getElementById('rl-reward-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const history = rlAgent.rewardHistory;
+    if (history.length < 2) {
+      ctx.fillStyle = '#64748b';
+      ctx.font = '8px Share Tech Mono';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText("Waiting for episodes...", w / 2, h / 2);
+      return;
+    }
+
+    // Scale min/max
+    let maxVal = Math.max(...history);
+    let minVal = Math.min(...history);
+    if (maxVal === minVal) {
+      maxVal += 1.0;
+      minVal -= 1.0;
+    }
+    const range = maxVal - minVal;
+
+    // Draw line
+    ctx.strokeStyle = '#00e676';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let i = 0; i < history.length; i++) {
+      const x = (i / (history.length - 1)) * w;
+      const y = h - 10 - ((history[i] - minVal) / range) * (h - 20);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Draw fill area gradient
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, 'rgba(0, 230, 118, 0.15)');
+    grad.addColorStop(1, 'rgba(0, 230, 118, 0.0)');
+    ctx.fillStyle = grad;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const x = (i / (history.length - 1)) * w;
+      const y = h - 10 - ((history[i] - minVal) / range) * (h - 20);
+      if (i === history.length - 1) {
+        ctx.lineTo(x, h);
+      }
+      ctx.lineTo(x, y);
+      if (i === 0) {
+        ctx.lineTo(0, h);
+      }
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // Labels
+    ctx.fillStyle = '#64748b';
+    ctx.font = '7px Share Tech Mono';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Max: ${maxVal.toFixed(0)}`, 4, 10);
+    ctx.fillText(`Min: ${minVal.toFixed(0)}`, 4, h - 4);
+  };
+
+  // Draw RL Neural Network Activations
+  const drawRlNetwork = () => {
+    const canvas = document.getElementById('rl-nn-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const inputsCount = 5;
+    const hiddenCount = 4;
+    const outputsCount = 5;
+
+    const getPos = (layer, idx, total) => {
+      const spacing = (h - 24) / (total - 1 || 1);
+      const startY = 12;
+      let x = 36;
+      if (layer === 1) x = w / 2;
+      else if (layer === 2) x = w - 46;
+      return { x, y: startY + idx * spacing };
+    };
+
+    const acts = rlAgent.nnActivations;
+    const weights = rlAgent.nnWeights;
+
+    // 1. Connection lines
+    // Inputs -> Hidden
+    for (let i = 0; i < inputsCount; i++) {
+      const pStart = getPos(0, i, inputsCount);
+      for (let j = 0; j < hiddenCount; j++) {
+        const pEnd = getPos(1, j, hiddenCount);
+        const wVal = weights.inputToHidden[i][j];
+        ctx.strokeStyle = wVal > 0 ? `rgba(0, 242, 254, ${Math.abs(wVal) * 0.4})` : `rgba(255, 71, 87, ${Math.abs(wVal) * 0.4})`;
+        ctx.lineWidth = Math.abs(wVal) * 1.5;
+        ctx.beginPath();
+        ctx.moveTo(pStart.x, pStart.y);
+        ctx.lineTo(pEnd.x, pEnd.y);
+        ctx.stroke();
+      }
+    }
+
+    // Hidden -> Outputs
+    for (let j = 0; j < hiddenCount; j++) {
+      const pStart = getPos(1, j, hiddenCount);
+      for (let k = 0; k < outputsCount; k++) {
+        const pEnd = getPos(2, k, outputsCount);
+        const wVal = weights.hiddenToOutput[j][k];
+        ctx.strokeStyle = wVal > 0 ? `rgba(0, 242, 254, ${Math.abs(wVal) * 0.4})` : `rgba(255, 71, 87, ${Math.abs(wVal) * 0.4})`;
+        ctx.lineWidth = Math.abs(wVal) * 1.5;
+        ctx.beginPath();
+        ctx.moveTo(pStart.x, pStart.y);
+        ctx.lineTo(pEnd.x, pEnd.y);
+        ctx.stroke();
+      }
+    }
+
+    // 2. Nodes
+    // Inputs
+    const inputLabels = ['CTE', 'Yaw', 'Obs', 'dCTE', 'Bias'];
+    for (let i = 0; i < inputsCount; i++) {
+      const p = getPos(0, i, inputsCount);
+      const act = acts.inputs[i];
+      ctx.fillStyle = '#0a0b16';
+      ctx.strokeStyle = '#00f2fe';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(0, 242, 254, ${Math.max(0.1, (act + 1.0) / 2.0)})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#64748b';
+      ctx.font = '6px Space Grotesk';
+      ctx.textAlign = 'right';
+      ctx.fillText(inputLabels[i], p.x - 8, p.y + 2);
+    }
+
+    // Hidden
+    for (let j = 0; j < hiddenCount; j++) {
+      const p = getPos(1, j, hiddenCount);
+      const act = acts.hidden[j];
+      ctx.fillStyle = '#0a0b16';
+      ctx.strokeStyle = '#8b5cf6';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(139, 92, 246, ${Math.max(0.1, (act + 1.0) / 2.0)})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Outputs
+    const actionLabels = ['L-Hard', 'L-Soft', 'Straight', 'R-Soft', 'R-Hard'];
+    for (let k = 0; k < outputsCount; k++) {
+      const p = getPos(2, k, outputsCount);
+      const act = acts.outputs[k];
+      const norm = Math.max(0.1, Math.min(1.0, (act + 1.0) / 2.0));
+
+      ctx.fillStyle = '#0a0b16';
+      ctx.strokeStyle = '#00e676';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(0, 230, 118, ${norm})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#64748b';
+      ctx.font = '6px Space Grotesk';
+      ctx.textAlign = 'left';
+      ctx.fillText(actionLabels[k], p.x + 8, p.y + 2);
+    }
+  };
+
+  const animateGraph = () => {
+    if (simulation.trackAActive) {
+      drawROS2Graph();
+    } else if (simulation.trackCActive) {
+      drawRlNetwork();
+    }
     requestAnimationFrame(animateGraph);
   };
 
@@ -973,6 +1314,118 @@ document.addEventListener('DOMContentLoaded', () => {
     drawEDAScan();
     logROS2("[INFO] [perception_node]: executing Pandas dataset cleaning algorithm...");
     logROS2("[INFO] [perception_node]: filtered outliers and Lidar background noise. Bounding boxes locked.");
+  });
+
+  // --- TRACK C DYNAMIC EVENTS ---
+  tabTrackC.addEventListener('click', () => {
+    // Highlight active tab
+    tabTrackB.classList.remove('active');
+    tabTrackA.classList.remove('active');
+    tabTrackC.classList.add('active');
+
+    // Toggle panels
+    trackBSdcBody.classList.add('hidden');
+    trackASdcBody.classList.add('hidden');
+    trackCSdcBody.classList.remove('hidden');
+
+    picoConsole.classList.add('hidden');
+    ros2Console.classList.add('hidden');
+    rlConsole.classList.remove('hidden');
+    consoleTitle.innerText = "RL AGENT POLICY CONSOLE";
+
+    trackBControlsBody.classList.add('hidden');
+    trackAControlsBody.classList.add('hidden');
+    trackCControlsBody.classList.remove('hidden');
+    controlsTitle.innerText = "RL HYPERPARAMETER TUNER";
+
+    trackBHardwareBody.classList.add('hidden');
+    trackAHardwareBody.classList.add('hidden');
+    trackCHardwareBody.classList.remove('hidden');
+    hardwareTitle.innerText = "Q-NETWORK NODE ACTIVATIONS";
+    hardwareBadge.innerText = "TRAINING";
+    hardwareBadge.className = "badge badge-green";
+
+    // Disengage others
+    chkAutonomous.checked = false;
+    stopAutonomousMode();
+    stopROS2Autopilot();
+
+    simulation.setTrackMode('C');
+    simulation.drawWaypoints(sdc.mapping.getWaypoints());
+    
+    // Draw initial reward history chart
+    drawRlRewardChart();
+
+    logRL("[RL] Switched to Track C. Ready to train.");
+  });
+
+  simulation.onRLEpisodeEnd = (episodeNum, totalReward) => {
+    logRL(`[RL] Episode ${episodeNum} finished. Cumulative Reward: ${totalReward.toFixed(1)}`, totalReward > 0 ? 'success' : 'error');
+    drawRlRewardChart();
+    rlValEpisode.innerText = episodeNum;
+  };
+
+  btnRlStart.addEventListener('click', () => {
+    simulation.rlTrainingActive = true;
+    btnRlStart.style.display = 'none';
+    btnRlPause.style.display = 'inline-block';
+    logRL("[RL] Training loop engaged.", "success");
+  });
+
+  btnRlPause.addEventListener('click', () => {
+    simulation.rlTrainingActive = false;
+    btnRlStart.style.display = 'inline-block';
+    btnRlPause.style.display = 'none';
+    logRL("[RL] Training loop paused.", "warning");
+  });
+
+  btnRlReset.addEventListener('click', () => {
+    rlAgent.resetAgent();
+    simulation.resetVehicleToStart();
+
+    rlValEpisode.innerText = '0';
+    rlValStep.innerText = '0';
+    rlValReward.innerText = '0.00';
+    rlValCumReward.innerText = '0.0';
+
+    // Clear chart canvas
+    const canvas = document.getElementById('rl-reward-canvas');
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    
+    logRL("[RL] Q-table reset complete. Agent returned to baseline.", "error");
+  });
+
+  sliderRlEpsilon.addEventListener('input', (e) => {
+    const val = e.target.value / 100.0;
+    labelRlEpsilon.innerText = val.toFixed(2);
+    rlAgent.epsilon = val;
+  });
+
+  sliderRlSpeedup.addEventListener('input', (e) => {
+    const val = parseInt(e.target.value);
+    labelRlSpeedup.innerText = `${val}x`;
+    simulation.trackCSpeedup = val;
+  });
+
+  sliderRlWeightSpeed.addEventListener('input', (e) => {
+    const val = e.target.value / 10.0;
+    labelRlWeightSpeed.innerText = val.toFixed(1);
+    rlAgent.wSpeed = val;
+  });
+
+  sliderRlWeightCte.addEventListener('input', (e) => {
+    const val = e.target.value / 10.0;
+    labelRlWeightCte.innerText = val.toFixed(1);
+    rlAgent.wCte = val;
+  });
+
+  sliderRlWeightCol.addEventListener('input', (e) => {
+    const val = e.target.value / 10.0;
+    labelRlWeightCol.innerText = val.toFixed(1);
+    rlAgent.wCollision = val;
   });
 
   // Initial draw and trigger graph animation
