@@ -83,11 +83,18 @@ class SimulationEngine {
     this.currentWaypoints = [];
     this.lidarAngle = 0.0;
 
+    // Track C RL states
+    this.trackCActive = false;
+    this.trackCSpeedup = 1;
+    this.rlTrainingActive = false;
+    this.hasCollidedThisTick = false;
+
     // Setup Scenes
     this.initThree();
     this.loadMap(this.currentMapName);
     this.createRobotCar();
     this.createSedanCar();
+    this.createGhostRobot();
     this.setupLighting();
 
     // Start loop
@@ -716,8 +723,56 @@ class SimulationEngine {
     this.sedanGroup.visible = false;
   }
 
-  // Swap Track B and Track A visual components
+  // Create glowing cyan wireframe ghost robot representing EKF estimated pose
+  createGhostRobot() {
+    this.ghostGroup = new THREE.Group();
+    
+    // Wireframe Box matching robot dimensions
+    const boxGeo = new THREE.BoxGeometry(this.car.width, this.car.height - 0.4, this.car.length);
+    const boxMat = new THREE.MeshBasicMaterial({ 
+      color: 0x00f2fe, 
+      wireframe: true, 
+      transparent: true, 
+      opacity: 0.35 
+    });
+    const box = new THREE.Mesh(boxGeo, boxMat);
+    box.position.y = 0.5;
+    this.ghostGroup.add(box);
+
+    // Directional pointer cone
+    const coneGeo = new THREE.ConeGeometry(0.3, 0.9, 4);
+    coneGeo.rotateX(Math.PI / 2);
+    const coneMat = new THREE.MeshBasicMaterial({ 
+      color: 0x00f2fe, 
+      transparent: true, 
+      opacity: 0.6 
+    });
+    const cone = new THREE.Mesh(coneGeo, coneMat);
+    cone.position.set(0, 0.9, 1.2);
+    this.ghostGroup.add(cone);
+
+    this.scene.add(this.ghostGroup);
+    this.ghostGroup.visible = false;
+  }
+
+  setEstimatedPose(x, z, yaw) {
+    if (this.ghostGroup) {
+      this.ghostGroup.position.x = x;
+      this.ghostGroup.position.z = z;
+      this.ghostGroup.position.y = this.getTerrainHeight(x, z) + 0.35;
+      this.ghostGroup.rotation.y = yaw;
+      this.ghostGroup.visible = true;
+    }
+  }
+
+  clearEstimatedPose() {
+    if (this.ghostGroup) {
+      this.ghostGroup.visible = false;
+    }
+  }
+
   setTrackMode(mode) {
+    this.trackCActive = false;
     if (mode === 'A') {
       this.trackAActive = true;
       this.robotGroup.visible = false;
@@ -731,6 +786,20 @@ class SimulationEngine {
       this.loadMap(this.currentMapName);
       
       this.picoVM.log("[시스템] TRACK A (ROS2 자율주행 시뮬레이션) 전환 완료.", "success");
+    } else if (mode === 'C') {
+      this.trackAActive = false;
+      this.trackCActive = true;
+      this.robotGroup.visible = false;
+      this.sedanGroup.visible = true;
+      
+      // Toggle headlights
+      this.headlights.forEach(l => l.visible = false);
+      this.sedanHeadlights.forEach(l => l.visible = this.showHeadlights);
+      
+      // Reset position
+      this.loadMap(this.currentMapName);
+      
+      this.picoVM.log("[시스템] TRACK C (RL 강화학습 시뮬레이션) 전환 완료.", "success");
     } else {
       this.trackAActive = false;
       this.robotGroup.visible = true;
@@ -822,9 +891,8 @@ class SimulationEngine {
     });
   }
 
-  // Update Physics Loop
   updatePhysics(dt) {
-    if (this.trackAActive) {
+    if (this.trackAActive || this.trackCActive) {
       this.updateTrackAPhysics(dt);
       return;
     }
@@ -970,7 +1038,9 @@ class SimulationEngine {
 
     // 3. LATERAL CONTROL LAW SELECTION
     let steer = 0.0;
-    if (this.trackAController === 'stanley') {
+    if (this.trackCActive) {
+      steer = this.trackASteeringAngle;
+    } else if (this.trackAController === 'stanley') {
       const k = this.trackAStanleyGains.k;
       const ks = this.trackAStanleyGains.ks;
       // Stanley Law
@@ -995,7 +1065,8 @@ class SimulationEngine {
     steer = Math.max(-maxSteer, Math.min(maxSteer, steer));
 
     // 4. LONGITUDINAL CONTROL (Speed PID)
-    const speedError = targetSpeed - speed;
+    const effectiveTargetSpeed = this.trackCActive ? 5.0 : targetSpeed;
+    const speedError = effectiveTargetSpeed - speed;
     const throttleBrake = this.speedPIDSim.update(speedError, dt);
 
     // Kinematic model acceleration and friction
@@ -1006,7 +1077,8 @@ class SimulationEngine {
     // Update velocity
     this.car.speed += accel * dt;
     // Clamp forward speed
-    this.car.speed = Math.max(-2.0, Math.min(this.car.speed, 22.0));
+    const maxAllowedSpeed = this.trackCActive ? 5.0 : 22.0;
+    this.car.speed = Math.max(-2.0, Math.min(this.car.speed, maxAllowedSpeed));
 
     // Update yaw heading based on steer angle (Bicycle Kinematics: dYaw = (V/L) * sin(Steer))
     const yawRate = (this.car.speed / wheelbase) * Math.sin(steer);
@@ -1087,15 +1159,16 @@ class SimulationEngine {
         // Kill momentum
         this.car.speed = -this.car.speed * 0.3; // bounce slightly
         
+        this.hasCollidedThisTick = true;
+
         // Log to Virtual Pico VM
         this.picoVM.log(`[시스템 경고] ${b.name} 충돌 발생! 차량 충돌 보호 구동 정지.`, 'error');
       }
     }
   }
 
-  // HC-SR04 Raycasting Obstacle Sensor
   updateUltrasonicSensor() {
-    if (this.trackAActive) {
+    if (this.trackAActive || this.trackCActive) {
       this.updateLidarSensor();
       return;
     }
@@ -1355,6 +1428,88 @@ class SimulationEngine {
     this.waypointGroup.add(pathLine);
   }
 
+  resetVehicleToStart() {
+    if (this.currentMapName === 'obstacle-course') {
+      this.car.position.set(0, 0.5, 40);
+      this.car.angle = Math.PI;
+    } else {
+      this.car.position.set(0, 0.5, 80);
+      this.car.angle = Math.PI;
+    }
+    this.car.velocity.set(0, 0, 0);
+    this.car.speed = 0;
+
+    // Reset controllers
+    if (this.speedPIDSim) this.speedPIDSim.reset();
+    if (this.steerPIDSim) this.steerPIDSim.reset();
+    this.trackASteeringAngle = 0.0;
+    this.trackASpeedError = 0.0;
+    this.trackACTE = 0.0;
+    this.trackAHeadingError = 0.0;
+    this.hasCollidedThisTick = false;
+
+    // Update meshes immediately
+    if (this.robotGroup) {
+      this.robotGroup.position.copy(this.car.position);
+      this.robotGroup.rotation.y = this.car.angle;
+    }
+    if (this.sedanGroup) {
+      this.sedanGroup.position.copy(this.car.position);
+      this.sedanGroup.rotation.y = this.car.angle;
+    }
+  }
+
+  tickRLAgent(dt, isLearning = true) {
+    if (!window.rlAgent) return;
+
+    const agent = window.rlAgent;
+    const cte = this.trackACTE;
+    const yawError = this.trackAHeadingError;
+    const sensorDist = this.sensorDistance; // in cm
+
+    // 1. Check for episode termination (done state)
+    let done = false;
+    let collision = this.hasCollidedThisTick;
+    this.hasCollidedThisTick = false; // Reset for next tick
+
+    // Drifting too far from the road map boundary (|e_cte| > 12.0 meters)
+    let outOfBounds = Math.abs(cte) > 12.0;
+
+    if (collision || outOfBounds) {
+      done = true;
+    }
+
+    // 2. Calculate Reward
+    let reward = 0.0;
+    if (done) {
+      reward = -agent.wCollision;
+    } else {
+      const progressReward = this.car.speed * Math.cos(yawError) * agent.wSpeed;
+      const ctePenalty = -Math.abs(cte) * agent.wCte;
+      reward = progressReward + ctePenalty;
+    }
+
+    // Store the reward on agent so it can be picked up by telemetry
+    agent.lastReward = reward;
+
+    // 3. Perform Q-learning Update
+    if (isLearning) {
+      agent.updateQTable(cte, yawError, sensorDist, reward, done);
+    }
+
+    // 4. If episode is done, reset vehicle and notify dashboard
+    if (done) {
+      const finalReward = agent.endEpisode();
+      this.resetVehicleToStart();
+      if (this.onRLEpisodeEnd) {
+        this.onRLEpisodeEnd(agent.episodeCount, finalReward);
+      }
+    } else {
+      // Choose next action (returns steering angle in radians)
+      this.trackASteeringAngle = agent.selectAction(cte, yawError, sensorDist);
+    }
+  }
+
   // Animation Loop
   animate() {
     requestAnimationFrame(() => this.animate());
@@ -1372,13 +1527,26 @@ class SimulationEngine {
     }
 
     // Spin Lidar Visual turret disc
-    if (this.lidarDisk && this.trackAActive) {
+    if (this.lidarDisk && (this.trackAActive || this.trackCActive)) {
       this.lidarDisk.rotation.y += dt * 8;
     }
 
     // Update Physics and Hardware
-    this.updatePhysics(dt);
-    this.updateUltrasonicSensor();
+    if (this.trackCActive && this.rlTrainingActive) {
+      const iterations = this.trackCSpeedup || 1;
+      for (let i = 0; i < iterations; i++) {
+        this.updatePhysics(dt);
+        this.updateUltrasonicSensor();
+        this.tickRLAgent(dt, true);
+      }
+    } else {
+      this.updatePhysics(dt);
+      this.updateUltrasonicSensor();
+      if (this.trackCActive) {
+        this.tickRLAgent(dt, false);
+      }
+    }
+
     this.updateCameras();
     this.updateTelemetry();
 
