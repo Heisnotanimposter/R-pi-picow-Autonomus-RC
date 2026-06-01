@@ -30,6 +30,7 @@
       <div class="track-tab-selector">
         <button id="tab-track-b" class="tab-btn active">TRACK B: EMBEDDED SYSTEM</button>
         <button id="tab-track-a" class="tab-btn">TRACK A: ROS2 AUTOPILOT</button>
+        <button id="tab-track-c" class="tab-btn">TRACK C: RL AUTOPILOT</button>
       </div>
 
       <div class="system-status">
@@ -139,6 +140,58 @@
               <button id="btn-trigger-fault" class="btn-small text-danger" style="margin-top: 10px; width: 100%;">TRIGGER SENSOR BLOCKAGE</button>
             </div>
           </div>
+          <!-- Track C: RL Stack Monitor -->
+          <div class="card-body hidden" id="track-c-sdc-body">
+            <div class="rl-monitor-container" style="display: flex; flex-direction: column; gap: 8px;">
+              <div class="grid-viz-container" style="margin-bottom: 2px;">
+                <canvas id="rl-reward-canvas" width="120" height="120" style="background: #020205; border: 1px solid var(--border-light); border-radius: 6px; width: 96px; height: 96px;"></canvas>
+                <div class="stack-status-info">
+                  <div class="stack-row"><span>Episode:</span><span id="rl-val-episode" class="font-mono text-info">0</span></div>
+                  <div class="stack-row"><span>Step:</span><span id="rl-val-step" class="font-mono">0</span></div>
+                  <div class="stack-row"><span>Reward:</span><span id="rl-val-reward" class="font-mono text-success">0.0</span></div>
+                  <div class="stack-row"><span>Total Rew:</span><span id="rl-val-cumreward" class="font-mono text-warning">0.0</span></div>
+                </div>
+              </div>
+              <div class="policy-bars-container" style="display: flex; flex-direction: column; gap: 4px; font-size: 0.7rem;">
+                <div style="font-weight: bold; color: var(--accent-cyan); font-size: 0.65rem; font-family: var(--font-mono); margin-bottom: 2px;">ACTION Q-VALUES (STEER)</div>
+                <div class="policy-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="width: 50px;">L (Hard)</span>
+                  <div style="flex-grow: 1; height: 6px; background: rgba(255,255,255,0.05); margin: 0 6px; border-radius: 3px; overflow: hidden;">
+                    <div id="q-bar-left-hard" style="width: 0%; height: 100%; background: #00d2ff; transition: width 0.05s ease;"></div>
+                  </div>
+                  <span id="q-val-left-hard" class="font-mono" style="width: 30px; text-align: right;">0.0</span>
+                </div>
+                <div class="policy-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="width: 50px;">L (Soft)</span>
+                  <div style="flex-grow: 1; height: 6px; background: rgba(255,255,255,0.05); margin: 0 6px; border-radius: 3px; overflow: hidden;">
+                    <div id="q-bar-left-soft" style="width: 0%; height: 100%; background: #00f2fe; transition: width 0.05s ease;"></div>
+                  </div>
+                  <span id="q-val-left-soft" class="font-mono" style="width: 30px; text-align: right;">0.0</span>
+                </div>
+                <div class="policy-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="width: 50px;">Straight</span>
+                  <div style="flex-grow: 1; height: 6px; background: rgba(255,255,255,0.05); margin: 0 6px; border-radius: 3px; overflow: hidden;">
+                    <div id="q-bar-straight" style="width: 0%; height: 100%; background: #00e676; transition: width 0.05s ease;"></div>
+                  </div>
+                  <span id="q-val-straight" class="font-mono" style="width: 30px; text-align: right;">0.0</span>
+                </div>
+                <div class="policy-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="width: 50px;">R (Soft)</span>
+                  <div style="flex-grow: 1; height: 6px; background: rgba(255,255,255,0.05); margin: 0 6px; border-radius: 3px; overflow: hidden;">
+                    <div id="q-bar-right-soft" style="width: 0%; height: 100%; background: #ff7675; transition: width 0.05s ease;"></div>
+                  </div>
+                  <span id="q-val-right-soft" class="font-mono" style="width: 30px; text-align: right;">0.0</span>
+                </div>
+                <div class="policy-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="width: 50px;">R (Hard)</span>
+                  <div style="flex-grow: 1; height: 6px; background: rgba(255,255,255,0.05); margin: 0 6px; border-radius: 3px; overflow: hidden;">
+                    <div id="q-bar-right-hard" style="width: 0%; height: 100%; background: #ff4757; transition: width 0.05s ease;"></div>
+                  </div>
+                  <span id="q-val-right-hard" class="font-mono" style="width: 30px; text-align: right;">0.0</span>
+                </div>
+              </div>
+            </div>
+          </div>
           <!-- Track A: EDA & nuScenes Scan -->
           <div class="card-body hidden" id="track-a-sdc-body">
             <div class="eda-container" style="display: flex; flex-direction: column; gap: 8px;">
@@ -173,6 +226,9 @@
           </div>
           <div class="card-body font-mono hidden" id="ros2-console">
             <div class="log-line text-muted">[ROS2] Initializing rclpy nodes...</div>
+          </div>
+          <div class="card-body font-mono hidden" id="rl-console">
+            <div class="log-line text-muted">[RL] Agent initialization complete. Ready for training.</div>
           </div>
         </div>
 
@@ -336,6 +392,66 @@
               <input type="range" id="slider-target-speed" min="20" max="150" value="80" class="range-slider">
             </div>
           </div>
+          <!-- Track C Controls -->
+          <div class="card-body hidden" id="track-c-controls-body">
+            <!-- Training Controls -->
+            <div class="autopilot-section" style="margin-bottom: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span class="label-heading">RL Agent Training</span>
+                <div style="display: flex; gap: 6px;">
+                  <button id="btn-rl-start" class="btn-small text-success" style="padding: 4px 8px; font-weight: bold;">TRAIN</button>
+                  <button id="btn-rl-pause" class="btn-small text-warning" style="padding: 4px 8px; font-weight: bold; display: none;">PAUSE</button>
+                  <button id="btn-rl-reset" class="btn-small text-danger" style="padding: 4px 8px;">RESET</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Epsilon / Exploration rate -->
+            <div class="pwm-slider-container" style="margin-top: 6px;">
+              <div class="slider-labels">
+                <span class="label">Exploration Rate (ε-Epsilon):</span>
+                <span id="rl-epsilon-val" class="value">0.20</span>
+              </div>
+              <input type="range" id="slider-rl-epsilon" min="0" max="100" value="20" class="range-slider">
+            </div>
+
+            <!-- Speedup factor -->
+            <div class="pwm-slider-container" style="margin-top: 6px;">
+              <div class="slider-labels">
+                <span class="label">Simulation Speedup (Physics):</span>
+                <span id="rl-speedup-val" class="value">1x</span>
+              </div>
+              <input type="range" id="slider-rl-speedup" min="1" max="10" value="1" class="range-slider">
+            </div>
+
+            <hr class="divider" style="margin: 8px 0;">
+
+            <!-- Reward weights customizer -->
+            <div class="reward-tuning-group">
+              <label class="label-heading" style="display: block; margin-bottom: 4px; font-size: 0.75rem; color: #64748b;">Reward Function Weights</label>
+              <div class="pwm-slider-container" style="margin-top: 4px;">
+                <div class="slider-labels">
+                  <span class="label">Speed Progress Weight:</span>
+                  <span id="rl-weight-speed-val" class="value">1.0</span>
+                </div>
+                <input type="range" id="slider-rl-weight-speed" min="0" max="30" value="10" class="range-slider">
+              </div>
+              <div class="pwm-slider-container" style="margin-top: 4px;">
+                <div class="slider-labels">
+                  <span class="label">CTE Penalty Weight:</span>
+                  <span id="rl-weight-cte-val" class="value">1.5</span>
+                </div>
+                <input type="range" id="slider-rl-weight-cte" min="0" max="30" value="15" class="range-slider">
+              </div>
+              <div class="pwm-slider-container" style="margin-top: 4px;">
+                <div class="slider-labels">
+                  <span class="label">Collision Penalty:</span>
+                  <span id="rl-weight-col-val" class="value">15.0</span>
+                </div>
+                <input type="range" id="slider-rl-weight-col" min="50" max="300" value="150" class="range-slider">
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Simulated Microcontroller Breadboard -->
@@ -387,6 +503,16 @@
             </div>
             <div style="position: relative; width: 100%; height: 180px; background: #020205; border: 1px solid var(--border-light); border-radius: 8px; overflow: hidden;">
               <canvas id="ros2-graph-canvas" width="318" height="178" style="width: 100%; height: 100%; display: block;"></canvas>
+            </div>
+          </div>
+
+          <!-- Track C Neural Network visualizer -->
+          <div class="card-body hidden" id="track-c-hardware-body" style="padding: 10px; display: flex; flex-direction: column; justify-content: center; align-items: center;">
+            <div class="ros2-graph-title" style="font-size: 0.65rem; color: var(--accent-cyan); font-family: var(--font-mono); margin-bottom: 6px; width: 100%; text-align: center; font-weight: bold;">
+              DEEP Q-NETWORK POLICY ACTIVATIONS
+            </div>
+            <div style="position: relative; width: 100%; height: 180px; background: #020205; border: 1px solid var(--border-light); border-radius: 8px; overflow: hidden;">
+              <canvas id="rl-nn-canvas" width="318" height="178" style="width: 100%; height: 100%; display: block;"></canvas>
             </div>
           </div>
         </div>
@@ -441,6 +567,7 @@
   <!-- Load Custom Scripts -->
   <script type="module" src="js/pico_vm.js"></script>
   <script type="module" src="js/sdc_stack.js"></script>
+  <script type="module" src="js/rl_agent.js"></script>
   <script type="module" src="js/simulation.js"></script>
   <script type="module" src="js/dashboard.js"></script>
 </body>
